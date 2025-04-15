@@ -39,8 +39,7 @@ This project implements and compares different neural network architectures for 
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/yourusername/project-2.git
-   cd project-2
+   git clone https://github.com/kshitizzd/text-generation
    ```
 
 2. Install dependencies:
