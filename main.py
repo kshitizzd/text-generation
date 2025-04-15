@@ -7,9 +7,9 @@ from glob import glob
 from models.rnn_model import RNNModel
 from models.lstm_model import LSTMModel
 from models.transformer_model import TransformerModel
-from utils.data_processing import TokenizerWrapper, train_tokenizer_on_all_texts, process_text_files
-from utils.training import train_model, TextDataset
-from utils.evaluation import generate_text
+from utils.data_processing import TokenizerWrapper, train_tokenizer_on_all_texts, process_text_files, process_jsonl_data
+from utils.training import train_model, TextDataset, JsonlDataset, load_and_combine_data
+from utils.evaluation import generate_text, evaluate_on_jsonl
 from config import MODEL_CONFIG, TRAINING_CONFIG
 
 def main():
@@ -21,6 +21,7 @@ def main():
 
     # Initialize tokenizer if it doesn't exist
     if not os.path.exists("data/processed/vocab.model"):
+        print("Training tokenizer on raw text files...")
         tokenizer = train_tokenizer_on_all_texts("data/raw", vocab_size=MODEL_CONFIG['vocab_size'])
         process_text_files("data/raw", "data/processed", TokenizerWrapper("data/processed/vocab.model"))
     
@@ -31,17 +32,48 @@ def main():
     MODEL_CONFIG['vocab_size'] = tokenizer.get_vocab_size()
     print(f"Vocabulary size: {MODEL_CONFIG['vocab_size']}")
 
-    # Load and prepare data from processed files
-    all_data = []
-    for file_path in glob("data/processed/*_tokenized.pkl"):
-        with open(file_path, "rb") as f:
-            data = pickle.load(f)
-            all_data.extend(data[:TRAINING_CONFIG['max_sequences'] // len(glob("data/processed/*_tokenized.pkl"))])
-            if len(all_data) >= TRAINING_CONFIG['max_sequences']:
-                all_data = all_data[:TRAINING_CONFIG['max_sequences']]
-                break
+    # Process JSONL files if not already processed
+    jsonl_files = []
+    
+    train_jsonl = "data/train.jsonl"
+    test_jsonl = "data/test.jsonl"
+    
+    train_jsonl_processed = "data/processed/train_jsonl_tokenized.pkl"
+    test_jsonl_processed = "data/processed/test_jsonl_tokenized.pkl"
+    
+    if os.path.exists(train_jsonl) and not os.path.exists(train_jsonl_processed):
+        print("Processing train.jsonl...")
+        process_jsonl_data(train_jsonl, train_jsonl_processed, tokenizer)
+        jsonl_files.append(train_jsonl_processed)
+    elif os.path.exists(train_jsonl_processed):
+        jsonl_files.append(train_jsonl_processed)
+        
+    if os.path.exists(test_jsonl) and not os.path.exists(test_jsonl_processed):
+        print("Processing test.jsonl...")
+        process_jsonl_data(test_jsonl, test_jsonl_processed, tokenizer)
+        jsonl_files.append(test_jsonl_processed)
+    elif os.path.exists(test_jsonl_processed):
+        jsonl_files.append(test_jsonl_processed)
 
-    # Split data into training and test sets
+    # Load and combine data from both sources
+    all_data = []
+    processed_files = glob("data/processed/*_tokenized.pkl")
+    
+    # If we have processed files, load and combine them
+    if processed_files:
+        all_data = load_and_combine_data(
+            processed_files,
+            [train_jsonl, test_jsonl],
+            tokenizer,
+            MODEL_CONFIG['max_seq_len'],
+            TRAINING_CONFIG['max_sequences']
+        )
+    
+    if not all_data:
+        print("No data found or loaded. Please check your data files.")
+        return
+        
+    # Shuffle and split data into training and test sets
     random.shuffle(all_data)
     split_idx = int(len(all_data) * 0.9)
     train_data = all_data[:split_idx]
@@ -60,6 +92,13 @@ def main():
         TextDataset(test_data, MODEL_CONFIG['max_seq_len']),
         batch_size=TRAINING_CONFIG['batch_size']
     )
+    
+    # Also create specific JSONL dataset loaders for evaluation
+    jsonl_eval_loaders = {}
+    if os.path.exists(test_jsonl):
+        jsonl_eval_loaders['test'] = JsonlDataset(test_jsonl, tokenizer, MODEL_CONFIG['max_seq_len'])
+    if os.path.exists(train_jsonl):
+        jsonl_eval_loaders['train'] = JsonlDataset(train_jsonl, tokenizer, MODEL_CONFIG['max_seq_len'], max_samples=100)
 
     # Initialize all models
     models = {
@@ -124,6 +163,15 @@ def main():
             print(f"Generated: {result['text']}")
             print(f"Perplexity: {result['perplexity']:.2f}")
             print(f"BLEU Score: {result['bleu_score']:.4f}")
+        
+        # Evaluate on jsonl test set if available
+        if os.path.exists(test_jsonl):
+            print(f"\nEvaluating {model_name} on test.jsonl:")
+            eval_results = evaluate_on_jsonl(model, tokenizer, test_jsonl, num_samples=50)
+            print(f"Samples evaluated: {eval_results['samples_evaluated']}")
+            print(f"Accuracy: {eval_results['accuracy']:.4f}")
+            print(f"Average perplexity: {eval_results['avg_perplexity']:.2f}")
+            print(f"Average BLEU score: {eval_results['avg_bleu']:.4f}")
 
 if __name__ == "__main__":
     # Entry point of the program

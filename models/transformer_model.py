@@ -43,6 +43,12 @@ class TransformerModel(nn.Module):
             Output tensor of shape (batch_size, seq_len, vocab_size)
         """
         B, L = x.size()
+        
+        # Truncate sequences that exceed max_seq_len
+        if L > self.max_seq_len:
+            x = x[:, :self.max_seq_len]
+            L = self.max_seq_len
+        
         # Embeddings + positional encoding
         x = self.embedding(x) + self.pos_embedding[:, :L, :]
         x = self.dropout(x)

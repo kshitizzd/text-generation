@@ -4,6 +4,7 @@ import math
 import nltk
 import os
 import numpy as np
+import json
 
 # Create a function to ensure NLTK data is downloaded
 def ensure_nltk_resources():
@@ -20,7 +21,7 @@ def ensure_nltk_resources():
         word_tokenize("Test sentence")
         return True
     except Exception as e:
-        print(f"Warning: NLTK initialization failed. Using basic tokenization instead.")
+        print(f"Using basic tokenization instead.")
         return False
 
 # Basic tokenization fallback
@@ -39,6 +40,10 @@ def calculate_perplexity(model, input_text, tokenizer):
         # Need at least 2 tokens for perplexity
         if len(tokens) < 2:
             return 100.0  # Return reasonable default for very short sequences
+        
+        # Truncate if exceeds model's max sequence length
+        if len(tokens) > model.max_seq_len + 1:  # +1 to account for target shifting
+            tokens = tokens[:model.max_seq_len + 1]
         
         # Prepare input and target
         input_ids = torch.tensor([tokens[:-1]])
@@ -104,6 +109,10 @@ def generate_text(model, tokenizer, prompt, max_length=50, temperature=0.7, p=0.
         if isinstance(tokens, torch.Tensor):
             tokens = tokens.squeeze().tolist()
         
+        # Truncate tokens if they exceed model's max sequence length
+        if len(tokens) > model.max_seq_len:
+            tokens = tokens[:model.max_seq_len]
+        
         input_ids = torch.tensor([tokens])
         generated = tokens.copy()
         
@@ -119,6 +128,12 @@ def generate_text(model, tokenizer, prompt, max_length=50, temperature=0.7, p=0.
         
         # Generate tokens
         for _ in range(max_length):
+            # Ensure input doesn't exceed model's max sequence length
+            if len(generated) > model.max_seq_len:
+                input_ids = torch.tensor([generated[-model.max_seq_len:]])
+            else:
+                input_ids = torch.tensor([generated])
+            
             # Get model output
             outputs = model(input_ids)
             next_token_logits = outputs[0, -1, :]
@@ -136,7 +151,6 @@ def generate_text(model, tokenizer, prompt, max_length=50, temperature=0.7, p=0.
             
             # Add to generated sequence
             generated.append(next_token)
-            input_ids = torch.tensor([generated])
             
             # Stop if maximum length reached
             if len(generated) >= model.max_seq_len:
@@ -155,33 +169,79 @@ def generate_text(model, tokenizer, prompt, max_length=50, temperature=0.7, p=0.
             'bleu_score': bleu_score
         }
 
-def calculate_coherence_score(text):
-    """
-    Calculate a simple coherence score based on sentence structure.
-    """
-    # Split into sentences
-    sentences = [s.strip() for s in text.split('.') if s.strip()]
-    
-    if not sentences:
-        return 0.0
-    
-    score = 0.0
-    for sentence in sentences:
-        words = sentence.split()
-        
-        # Check sentence length (too short or too long sentences reduce score)
-        length_score = min(len(words) / 10.0, 1.0) if len(words) < 20 else 20.0 / len(words)
-        
-        # Check for basic sentence structure (capital letter, ending punctuation)
-        structure_score = 0.0
-        if sentence and sentence[0].isupper():
-            structure_score += 0.5
-        if sentence and sentence[-1] in '.!?':
-            structure_score += 0.5
-            
-        score += (length_score + structure_score) / 2
 
-    return score / len(sentences)
+def evaluate_on_jsonl(model, tokenizer, jsonl_file, num_samples=100):
+    """
+    Evaluate model performance on prompt-completion pairs from jsonl file
+    """
+    model.eval()
+    with torch.no_grad():
+        # Load samples from jsonl file
+        samples = []
+        try:
+            with open(jsonl_file, 'r', encoding='utf-8') as f:
+                for i, line in enumerate(f):
+                    if i >= num_samples:
+                        break
+                    try:
+                        entry = json.loads(line.strip())
+                        if 'prompt' in entry and 'completion' in entry:
+                            samples.append(entry)
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as e:
+            print(f"Error loading jsonl file: {str(e)}")
+            return {}
+        
+        if not samples:
+            print(f"No valid samples found in {jsonl_file}")
+            return {}
+        
+        # Initialize metrics
+        total_perplexity = 0.0
+        total_bleu = 0.0
+        correct_predictions = 0
+        
+        # Process each sample
+        for sample in samples:
+            prompt = sample['prompt']
+            gold_completion = sample['completion']
+            
+            # Generate model prediction
+            result = generate_text(
+                model,
+                tokenizer,
+                prompt,
+                max_length=len(gold_completion.split()) + 5,  # Add buffer
+                model_type=type(model).__name__
+            )
+            
+            # Extract just the completion part (approximate)
+            generated_text = result['text']
+            if len(prompt) < len(generated_text):
+                model_completion = generated_text[len(prompt):].strip()
+            else:
+                model_completion = generated_text.strip()
+            
+            # Compare with gold completion (exact match for single tokens)
+            if gold_completion.strip() == model_completion.strip():
+                correct_predictions += 1
+            
+            # Accumulate metrics
+            total_perplexity += result['perplexity']
+            total_bleu += calculate_bleu(gold_completion, model_completion)
+        
+        # Calculate averages
+        avg_perplexity = total_perplexity / len(samples) if samples else 0
+        avg_bleu = total_bleu / len(samples) if samples else 0
+        accuracy = correct_predictions / len(samples) if samples else 0
+        
+        return {
+            'samples_evaluated': len(samples),
+            'accuracy': accuracy,
+            'avg_perplexity': avg_perplexity,
+            'avg_bleu': avg_bleu
+        }
 
 # Initialize NLTK resources when the module is imported
 ensure_nltk_resources()

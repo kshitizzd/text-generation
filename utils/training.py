@@ -3,6 +3,9 @@ from torch.utils.data import Dataset
 import matplotlib.pyplot as plt
 import numpy as np
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+import json
+import os
+import pickle
 
 
 class TextDataset(Dataset):
@@ -19,6 +22,50 @@ class TextDataset(Dataset):
             seq = seq[:self.max_seq_len]
         seq = torch.tensor(seq, dtype=torch.long)
         return seq[:-1], seq[1:]
+
+
+class JsonlDataset(Dataset):
+    def __init__(self, jsonl_file, tokenizer, max_seq_len, max_samples=None):
+        self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
+        self.samples = []
+        
+        # Load and tokenize data from JSONL file
+        try:
+            with open(jsonl_file, 'r', encoding='utf-8') as f:
+                for i, line in enumerate(f):
+                    if max_samples and i >= max_samples:
+                        break
+                    try:
+                        entry = json.loads(line.strip())
+                        if 'prompt' in entry and 'completion' in entry:
+                            # Tokenize the prompt and completion
+                            prompt_tokens = tokenizer.encode(entry['prompt'])
+                            completion_tokens = tokenizer.encode(entry['completion'])
+                            
+                            # Combine the tokens (prompt + completion)
+                            combined_tokens = prompt_tokens + completion_tokens
+                            
+                            # Trim if too long
+                            if len(combined_tokens) > max_seq_len:
+                                combined_tokens = combined_tokens[:max_seq_len]
+                            
+                            if len(combined_tokens) >= 2:  # Need at least 2 tokens for input/target
+                                self.samples.append(combined_tokens)
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as e:
+            print(f"Error loading jsonl file {jsonl_file}: {str(e)}")
+        
+        print(f"Loaded {len(self.samples)} samples from {jsonl_file}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        seq = self.samples[idx]
+        seq = torch.tensor(seq, dtype=torch.long)
+        return seq[:-1], seq[1:]  # Input is all but last token, target is all but first token
 
 
 def train_model(model, train_loader, test_loader, num_epochs, optimizer, config=None):
@@ -125,3 +172,29 @@ def save_plot(train_losses, val_losses, model_name):
     plt.legend()
     plt.savefig(f'outputs/plots/{model_name.lower()}_loss.png')
     plt.close()
+
+
+def load_and_combine_data(tokenized_files, jsonl_files, tokenizer, max_seq_len, max_sequences):
+    """
+    Load and combine data from tokenized files and JSONL files
+    """
+    all_data = []
+    
+    # Load tokenized data (from .pkl files)
+    for file_path in tokenized_files:
+        try:
+            with open(file_path, "rb") as f:
+                data = pickle.load(f)
+                all_data.extend(data[:max_sequences // len(tokenized_files)])
+        except Exception as e:
+            print(f"Error loading tokenized file {file_path}: {str(e)}")
+    
+    # Load JSONL data
+    for jsonl_file in jsonl_files:
+        if os.path.exists(jsonl_file):
+            jsonl_dataset = JsonlDataset(jsonl_file, tokenizer, max_seq_len, max_samples=max_sequences//len(jsonl_files))
+            for i in range(len(jsonl_dataset)):
+                seq, _ = jsonl_dataset[i]
+                all_data.append(seq.tolist())
+    
+    return all_data
